@@ -1,5 +1,4 @@
 """General-purpose training script for image-to-image translation.
-
 This script works for various models (with option '--model': e.g., pix2pix, cyclegan, colorization) and
 different datasets (with option '--dataset_mode': e.g., aligned, unaligned, single, colorization).
 You need to specify the dataset ('--dataroot'), experiment name ('--name'), and model ('--model').
@@ -19,19 +18,13 @@ from options.train_options import TrainOptions
 from data import create_dataset
 from models import create_model
 from util.visualizer import Visualizer
+import numpy as np
 from torch.utils.data import DataLoader
 
 if __name__ == '__main__':
     opt = TrainOptions().parse()   # get training options
-
-    # Create a dataset given opt.dataset_mode and other options
-    train_dataset = create_dataset(opt, train=True)  # You might need to modify the create_dataset function
-    val_dataset = create_dataset(opt, train=False)
-
-    train_loader = DataLoader(train_dataset, batch_size=opt.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=opt.batch_size, shuffle=False)
-
-    dataset_size = len(train_loader)    # get the number of batches in the dataset.
+    dataset = create_dataset(opt)  # create a dataset given opt.dataset_mode and other options
+    dataset_size = len(dataset)    # get the number of images in the dataset.
     print('The number of training images = %d' % dataset_size)
 
     model = create_model(opt)      # create a model given opt.model and other options
@@ -39,14 +32,19 @@ if __name__ == '__main__':
     visualizer = Visualizer(opt)   # create a visualizer that display/save images and plots
     total_iters = 0                # the total number of training iterations
 
-    for epoch in range(opt.epoch_count, opt.n_epochs + opt.n_epochs_decay + 1):    
-        model.train()  # Set model to training mode
+    # Prepare DataLoader for validation data
+    validation_data = create_dataset(opt)  # Modify or ensure this is pulling validation data
+    val_loader = DataLoader(validation_data, batch_size=opt.batch_size, shuffle=True)
+
+    for epoch in range(opt.epoch_count, opt.n_epochs + opt.n_epochs_decay + 1):    # outer loop for different epochs
         epoch_start_time = time.time()  # timer for entire epoch
         iter_data_time = time.time()    # timer for data loading per iteration
         epoch_iter = 0                  # the number of training iterations in current epoch, reset to 0 every epoch
         visualizer.reset()              # reset the visualizer: make sure it saves the results to HTML at least once every epoch
+        model.update_learning_rate()    # update learning rates at the start of the epoch.
 
-        for i, data in enumerate(train_loader):  # inner loop within one epoch
+        # Training Phase
+        for i, data in enumerate(dataset):  # inner loop within one epoch
             iter_start_time = time.time()  # timer for computation per iteration
             if total_iters % opt.print_freq == 0:
                 t_data = iter_start_time - iter_data_time
@@ -63,7 +61,7 @@ if __name__ == '__main__':
 
             if total_iters % opt.print_freq == 0:    # print training losses and save logging information to the disk
                 losses = model.get_current_losses()
-                accuracy = model.compute_accuracy()  # Compute and log training accuracy
+                t_comp = (time.time() - iter_start_time) / opt.batch_size
                 visualizer.print_current_losses(epoch, epoch_iter, losses, t_comp, t_data)
                 if opt.display_id > 0:
                     visualizer.plot_current_losses(epoch, float(epoch_iter) / dataset_size, losses)
@@ -75,21 +73,19 @@ if __name__ == '__main__':
 
             iter_data_time = time.time()
 
-        # Validation phase
-        model.eval()  # Set model to evaluation mode
+        # Validation Phase
+        model.eval()
         with torch.no_grad():
-            val_accuracies = []
             for i, data in enumerate(val_loader):
                 model.set_input(data)
-                model.test()  # Make sure this doesn't update weights
-                val_accuracies.append(model.compute_accuracy())
-            val_accuracy = sum(val_accuracies) / len(val_accuracies)
-            print(f'Epoch {epoch}, Validation Accuracy: {val_accuracy}')
+                model.test()
+                if i % opt.display_freq == 0:
+                    model.compute_visuals()
+                    visualizer.display_current_results(model.get_current_visuals(), epoch, save_result)
 
-        if epoch % opt.save_epoch_freq == 0:              # cache our model every <save_epoch_freq> epochs
+        if epoch % opt.save_epoch_freq == 0:  # cache our model every <save_epoch_freq> epochs
             print('saving the model at the end of epoch %d, iters %d' % (epoch, total_iters))
             model.save_networks('latest')
             model.save_networks(epoch)
 
         print('End of epoch %d / %d \t Time Taken: %d sec' % (epoch, opt.n_epochs + opt.n_epochs_decay, time.time() - epoch_start_time))
-
